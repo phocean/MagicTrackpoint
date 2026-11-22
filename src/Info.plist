@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in the binary (__TEXT,__info_plist). It gives the bare
+     executable a stable identity for code signing and the macOS privacy
+     database (TCC). Keep CFBundleShortVersionString in sync with VERSION. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.jcbaptiste.magictrackpoint</string>
+	<key>CFBundleName</key>
+	<string>MagicTrackpoint</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.2</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

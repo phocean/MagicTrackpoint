@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MagicTrackpoint user LaunchAgent (template).
+  scripts/install.sh replaces @DAEMON_PATH@ with the XML-escaped absolute path
+  of the installed daemon and writes the result to
+  ~/Library/LaunchAgents/com.jcbaptiste.magictrackpoint.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jcbaptiste.magictrackpoint</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>@DAEMON_PATH@</string>
+	</array>
+
+	<!-- Start at login (and when the agent is bootstrapped). -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart only after an abnormal exit (crash, nonzero status).
+	     A clean exit 0 (SIGTERM) keeps it stopped. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- At most one restart every 30 s: damps crash loops. -->
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+
+	<!-- Input path: no CPU/IO throttling by the scheduler. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<!-- Only in a graphical login session (event taps need one). -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<!-- Logging goes to os_log (subsystem com.jcbaptiste.magictrackpoint). -->
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+</dict>
+</plist>

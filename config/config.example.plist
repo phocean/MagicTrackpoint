@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MagicTrackpoint configuration.
+  Location: ~/.config/magictrackpoint/config.plist
+  (copied from config/config.example.plist by the installer, never overwritten).
+
+  Every key is optional: a missing key takes the default shown here.
+  After editing:
+    magictrackpointctl check     validate the file and print effective values
+    magictrackpointctl reload    apply it to the running daemon (SIGHUP)
+-->
+<plist version="1.0">
+<dict>
+	<key>trackpoint</key>
+	<dict>
+		<!-- Pointer sensitivity sent to the keyboard firmware.
+		     integer, 1 (slowest) to 9 (fastest). Default 7. -->
+		<key>sensitivity</key>
+		<integer>7</integer>
+	</dict>
+
+	<key>scroll</key>
+	<dict>
+		<!-- Middle button + TrackPoint scrolls. boolean. Default true. -->
+		<key>enabled</key>
+		<true/>
+
+		<!-- Scroll speed multiplier applied to the firmware scroll deltas.
+		     real, 0.1 to 10 (1.0 = unchanged). Default 1.0. -->
+		<key>speed</key>
+		<real>1.0</real>
+
+		<!-- Acceleration: the harder the TrackPoint is pushed, the faster
+		     it scrolls. Each firmware report (1 = gentle ... 3-4 = hard)
+		     scrolls units^(1 + acceleration) x 10 px x speed.
+		     real, 0 (linear) to 2. Default 1.0. -->
+		<key>acceleration</key>
+		<real>1.0</real>
+
+		<!-- Allow horizontal scrolling. boolean. Default true. -->
+		<key>horizontal</key>
+		<true/>
+
+		<!-- Dead zone before scrolling starts, in firmware scroll units
+		     accumulated since the middle button went down.
+		     integer, 0 to 50 (0 = scroll immediately). Default 3. -->
+		<key>threshold</key>
+		<integer>3</integer>
+	</dict>
+
+	<key>middle_button</key>
+	<dict>
+		<!-- Send a middle click on release when the press did not scroll.
+		     boolean. Default true. -->
+		<key>click_if_no_scroll</key>
+		<true/>
+	</dict>
+
+	<key>logging</key>
+	<dict>
+		<!-- os_log verbosity (subsystem com.jcbaptiste.magictrackpoint).
+		     string: "error", "info" or "debug". Default "error".
+		     View with: magictrackpointctl log -->
+		<key>level</key>
+		<string>error</string>
+	</dict>
+</dict>
+</plist>

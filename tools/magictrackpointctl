@@ -1,0 +1,228 @@
+#!/bin/bash
+# magictrackpointctl: control the MagicTrackpoint user agent.
+#
+# Usage: magictrackpointctl <command>
+#   status        launchd state and pid, daemon status file, config check
+#   start         load the LaunchAgent (or start it if already loaded)
+#   stop          unload it: stays stopped until next login or "start"
+#   restart       stop, then start
+#   reload        re-read the config without restarting (SIGHUP)
+#   permissions   restart the daemon so it asks macOS for its permissions again,
+#                 and open System Settings on the first one still missing
+#   log           stream the daemon log (Ctrl+C to quit)
+#   check [PATH]  validate a config file and print the effective values
+#   help          this text
+#
+# Exit status: 0 OK, 1 error; "status" exits 3 when the agent is not running,
+# "permissions" exits 3 while a permission is still missing.
+# Environment (tests): MTP_HOME (default $HOME), MTP_LAUNCHCTL (default launchctl),
+# MTP_OPEN (default open).
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Jean-Christophe Baptiste
+set -euo pipefail
+
+LABEL=com.jcbaptiste.magictrackpoint
+MTP_HOME=${MTP_HOME:-$HOME}
+LAUNCHCTL=${MTP_LAUNCHCTL:-launchctl}
+OPEN=${MTP_OPEN:-open}
+
+DAEMON=$MTP_HOME/.local/bin/magictrackpointd
+AGENT=$MTP_HOME/Library/LaunchAgents/$LABEL.plist
+STATUS_FILE=$MTP_HOME/Library/Caches/$LABEL/status
+CONFIG=$MTP_HOME/.config/magictrackpoint/config.plist
+DOMAIN=gui/$(id -u)
+SERVICE=$DOMAIN/$LABEL
+
+die() { printf 'magictrackpointctl: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+}
+
+is_loaded() { "$LAUNCHCTL" print "$SERVICE" >/dev/null 2>&1; }
+
+need_daemon() {
+    [ -x "$DAEMON" ] || die "daemon not installed at $DAEMON (run: make install)"
+}
+
+# Runs "magictrackpointd --check-config [PATH]". Without PATH the daemon uses
+# its default config path, unless MTP_HOME relocates it.
+check_config() {
+    need_daemon
+    if [ $# -gt 0 ]; then
+        "$DAEMON" --check-config "$1"
+    elif [ "$MTP_HOME" != "$HOME" ]; then
+        "$DAEMON" --check-config "$CONFIG"
+    else
+        "$DAEMON" --check-config
+    fi
+}
+
+wait_unloaded() {
+    local n=0
+    while is_loaded; do
+        n=$((n + 1))
+        [ "$n" -le 50 ] || die "$LABEL is still loaded after bootout"
+        sleep 0.1
+    done
+}
+
+cmd_start() {
+    if is_loaded; then
+        "$LAUNCHCTL" kickstart "$SERVICE" || die "launchctl kickstart $SERVICE failed"
+        echo "$LABEL started (already loaded)."
+    else
+        [ -f "$AGENT" ] || die "LaunchAgent not installed at $AGENT (run: make install)"
+        "$LAUNCHCTL" bootstrap "$DOMAIN" "$AGENT" || die "launchctl bootstrap $DOMAIN $AGENT failed"
+        echo "$LABEL loaded and started."
+    fi
+}
+
+cmd_stop() {
+    if ! is_loaded; then
+        echo "$LABEL is not loaded."
+        return 0
+    fi
+    "$LAUNCHCTL" bootout "$SERVICE" || die "launchctl bootout $SERVICE failed"
+    wait_unloaded
+    echo "$LABEL stopped. It stays stopped until your next login or \"magictrackpointctl start\"."
+}
+
+cmd_reload() {
+    is_loaded || die "$LABEL is not loaded (run: magictrackpointctl start)"
+    "$LAUNCHCTL" kill SIGHUP "$SERVICE" || die "launchctl kill SIGHUP $SERVICE failed (is it running?)"
+    echo "Sent SIGHUP to $LABEL: configuration reloaded."
+}
+
+status_value() { sed -n "s/^$1=//p" "$STATUS_FILE" 2>/dev/null | head -n 1; }
+# The permissions belong to the daemon process, so the request must come from
+# it. The daemon requests them at startup (IOHIDRequestAccess and
+# AXIsProcessTrustedWithOptions), which adds it to the System Settings lists.
+# Restarting it is also what makes a newly granted Input Monitoring take effect:
+# a running process keeps seeing it as missing (measured on macOS 27), whereas
+# Accessibility is picked up live.
+cmd_permissions() {
+    local n=0 im ax pane name first="" missing=0
+    if is_loaded; then cmd_stop >/dev/null; fi
+    rm -f "$STATUS_FILE"
+    cmd_start >/dev/null
+    while [ ! -s "$STATUS_FILE" ] && [ "$n" -lt 50 ]; do   # first status: at most 5 s
+        n=$((n + 1))
+        sleep 0.1
+    done
+    [ -s "$STATUS_FILE" ] || die "the daemon did not start (see: magictrackpointctl status)"
+    echo "Daemon restarted; it asked macOS for its permissions."
+
+    im=$(status_value input_monitoring)
+    ax=$(status_value accessibility)
+    echo "Input Monitoring: ${im:-?}"
+    echo "Accessibility:    ${ax:-?}"
+    # System Settings has a single window: open only the first missing pane.
+    for pane in "ListenEvent:Input Monitoring:$im" "Accessibility:Accessibility:$ax"; do
+        case ${pane##*:} in
+            granted|not-needed) ;;
+            *)  missing=$((missing + 1))
+                [ -z "$first" ] || continue
+                name=${pane#*:}; first=${name%:*}
+                "$OPEN" "x-apple.systempreferences:com.apple.preference.security?Privacy_${pane%%:*}" \
+                    || echo "Could not open System Settings ($first)." >&2 ;;
+        esac
+    done
+    if [ "$missing" -eq 0 ]; then
+        echo "All permissions granted."
+        return 0
+    fi
+    cat <<MSG
+
+System Settings is open on $first: turn on magictrackpointd.
+If it is not listed, click "+", press Cmd+Shift+G, type
+  $DAEMON
+and press Return, then Open. If an old magictrackpointd entry stays off after
+a reinstall, remove it with "-".
+Then run "magictrackpointctl permissions" again: Input Monitoring only takes
+effect after the restart this command does.
+MSG
+    return 3
+}
+
+cmd_status() {
+    local out state="" pid="" last="" rc=0
+    if out=$("$LAUNCHCTL" print "$SERVICE" 2>/dev/null); then
+        # Top-level keys of "launchctl print" are indented by exactly one tab;
+        # nested sections are deeper, so they are ignored. Unknown format -> "?".
+        state=$(printf '%s\n' "$out" | awk -F' = ' '/^\tstate = / { print $2; exit }')
+        pid=$(printf '%s\n' "$out" | awk -F' = ' '/^\tpid = / { print $2; exit }')
+        last=$(printf '%s\n' "$out" | awk -F' = ' '/^\tlast exit code = / { print $2; exit }')
+        echo "launchd:   loaded ($SERVICE)"
+        echo "state:     ${state:-?}"
+        echo "pid:       ${pid:--}"
+        [ -z "$last" ] || echo "last exit: $last"
+        [ "$state" = running ] || rc=3
+    else
+        echo "launchd:   not loaded ($SERVICE)"
+        [ -f "$AGENT" ] || echo "           LaunchAgent not installed at $AGENT"
+        rc=3
+    fi
+
+    echo
+    if [ -r "$STATUS_FILE" ]; then
+        echo "status file ($STATUS_FILE):"
+        sed 's/^/  /' "$STATUS_FILE"
+        [ "$rc" -eq 0 ] || echo "  (the daemon is not running: these values may be stale)"
+    else
+        echo "status file: none ($STATUS_FILE)"
+    fi
+
+    echo
+    echo "config check:"
+    if [ ! -x "$DAEMON" ]; then
+        echo "  daemon not installed at $DAEMON"
+        return 1
+    fi
+    if ! check_config 2>&1 | sed 's/^/  /'; then
+        return 1
+    fi
+    return "$rc"
+}
+
+cmd_log() {
+    exec log stream --style compact --level debug \
+        --predicate "subsystem == \"$LABEL\""
+}
+
+cmd=${1:-help}
+[ $# -eq 0 ] || shift
+
+case $cmd in
+    status)
+        [ $# -eq 0 ] || die "status takes no argument"
+        cmd_status ;;
+    start)
+        [ $# -eq 0 ] || die "start takes no argument"
+        cmd_start ;;
+    stop)
+        [ $# -eq 0 ] || die "stop takes no argument"
+        cmd_stop ;;
+    restart)
+        [ $# -eq 0 ] || die "restart takes no argument"
+        cmd_stop
+        cmd_start ;;
+    reload)
+        [ $# -eq 0 ] || die "reload takes no argument"
+        cmd_reload ;;
+    permissions)
+        [ $# -eq 0 ] || die "permissions takes no argument"
+        cmd_permissions ;;
+    log)
+        [ $# -eq 0 ] || die "log takes no argument"
+        cmd_log ;;
+    check)
+        [ $# -le 1 ] || die "usage: magictrackpointctl check [PATH]"
+        check_config "$@" ;;
+    help|-h|--help)
+        usage ;;
+    *)
+        usage >&2
+        die "unknown command: $cmd" ;;
+esac
