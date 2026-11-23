@@ -57,6 +57,23 @@
 		<true/>
 	</dict>
 
+	<key>keys</key>
+	<dict>
+		<!-- F4: mute or unmute the default microphone.
+		     boolean. Default true. -->
+		<key>microphone</key>
+		<true/>
+		<!-- F10: open Control Center on its Bluetooth module (System
+		     Settings > Bluetooth if that is not possible).
+		     boolean. Default true. -->
+		<key>bluetooth</key>
+		<true/>
+		<!-- Print Screen: send shift-command-5 (macOS screenshot tools,
+		     CleanShot...). boolean. Default true. -->
+		<key>screenshot</key>
+		<true/>
+	</dict>
+
 	<key>logging</key>
 	<dict>
 		<!-- os_log verbosity (subsystem com.jcbaptiste.magictrackpoint).

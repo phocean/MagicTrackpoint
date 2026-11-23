@@ -53,12 +53,16 @@ typedef struct {
     bool horizontal;        /* emit horizontal scrolling                    */
     int threshold;          /* firmware scroll units before scrolling, 0–50 */
     bool clickIfNoScroll;   /* emit a middle click when no scroll happened  */
+    bool keyMicrophone;     /* F4: mute/unmute the default microphone       */
+    bool keyBluetooth;      /* F10: Control Center, Bluetooth module         */
+    bool keyScreenshot;     /* Print Screen: send ⇧⌘5                        */
     MTPLogLevel logLevel;
 } MTPConfig;
 
 static inline MTPConfig mtp_default_config(void) {
     return (MTPConfig){ .sensitivity = 7, .scrollEnabled = true, .speed = 1.0,
         .acceleration = 1.0, .horizontal = true, .threshold = 3, .clickIfNoScroll = true,
+        .keyMicrophone = true, .keyBluetooth = true, .keyScreenshot = true,
         .logLevel = MTP_LOG_ERROR };
 }
 
@@ -145,6 +149,7 @@ static MTPConfig mtp_config_from_plist(id plist, NSMutableArray<NSString *> *err
         @"trackpoint": @[@"sensitivity"],
         @"scroll": @[@"enabled", @"speed", @"acceleration", @"horizontal", @"threshold"],
         @"middle_button": @[@"click_if_no_scroll"],
+        @"keys": @[@"microphone", @"bluetooth", @"screenshot"],
         @"logging": @[@"level"],
     };
     for (id name in plist) {
@@ -180,6 +185,10 @@ static MTPConfig mtp_config_from_plist(id plist, NSMutableArray<NSString *> *err
     mtp_cfg_int(scroll, @"scroll", @"threshold", 0, 50, &c.threshold, errors);
     mtp_cfg_bool(section(@"middle_button"), @"middle_button", @"click_if_no_scroll",
                  &c.clickIfNoScroll, errors);
+    NSDictionary *keys = section(@"keys");
+    mtp_cfg_bool(keys, @"keys", @"microphone", &c.keyMicrophone, errors);
+    mtp_cfg_bool(keys, @"keys", @"bluetooth", &c.keyBluetooth, errors);
+    mtp_cfg_bool(keys, @"keys", @"screenshot", &c.keyScreenshot, errors);
     id level = section(@"logging")[@"level"];
     if (level) {
         NSUInteger i = [level isKindOfClass:NSString.class]
@@ -237,6 +246,71 @@ static MTPConfig mtp_config_load(NSString *path, NSMutableArray<NSString *> *err
         return mtp_failed_config();
     }
     return mtp_config_from_plist(plist, errors);
+}
+
+/* ── Lenovo top-row keys ─────────────────────────────────────────────────── */
+/* Several top-row keys (F4 microphone, F8–F12) send vendor report 0x05 instead
+ * of a standard key, which macOS ignores. The report carries a 13-bit code
+ * (measured on the Bluetooth keyboard, 2026-11-23: F4 0x0BB, F8 0x0C1,
+ * F9 0x0BC, F10 0x0B6, F11 0x1B7, F12 0x0B8; 0 on release). Its descriptor
+ * declares the code as 13 one-bit elements of page 0xFF00 (usages
+ * 0xF1–0xFD), so IOKit delivers it bit by bit: the daemon matches only that
+ * page, which never carries typing, and rebuilds the code. */
+#define MTP_KEYS_PAGE      0xFF00
+#define MTP_KEYS_REPORT    0x05
+#define MTP_KEYS_FIRST     0xF1
+#define MTP_KEYS_BITS      13
+#define MTP_CODE_MICROPHONE 0x0BB   /* F4  */
+#define MTP_CODE_BLUETOOTH  0x0B6   /* F10 */
+
+/* Print Screen is a standard key (keyboard page 0x07, usage 0x46; macOS treats
+ * it as F13). Only this one usage is matched, never the rest of the typing. */
+#define MTP_PRINT_SCREEN_PAGE  0x07
+#define MTP_PRINT_SCREEN_USAGE 0x46
+
+typedef enum { MTP_KEY_NONE = 0, MTP_KEY_MICROPHONE, MTP_KEY_BLUETOOTH,
+               MTP_KEY_SCREENSHOT } MTPKey;
+
+typedef struct {
+    uint16_t bits;      /* code being rebuilt from the bit elements          */
+    uint16_t pressed;   /* code acted upon, until the release (code 0)       */
+} MTPKeyState;
+
+/* One bit element of report 0x05 changed. False if it is not one. */
+static inline bool mtp_key_bit(MTPKeyState *s, uint32_t reportID, uint32_t page,
+                               uint32_t usage, bool on) {
+    if (reportID != MTP_KEYS_REPORT || page != MTP_KEYS_PAGE ||
+        usage < MTP_KEYS_FIRST || usage >= MTP_KEYS_FIRST + MTP_KEYS_BITS) return false;
+    uint16_t bit = (uint16_t)(1u << (usage - MTP_KEYS_FIRST));
+    s->bits = on ? (uint16_t)(s->bits | bit) : (uint16_t)(s->bits & ~bit);
+    return true;
+}
+
+/* Called once all elements of a report were delivered. Returns the key newly
+ * pressed (once per press), MTP_KEY_NONE otherwise. */
+static inline MTPKey mtp_key_settle(MTPKeyState *s) {
+    if (!s->bits) { s->pressed = 0; return MTP_KEY_NONE; }
+    if (s->pressed) return MTP_KEY_NONE;      /* still held, or a chord */
+    s->pressed = s->bits;
+    switch (s->bits) {
+    case MTP_CODE_MICROPHONE: return MTP_KEY_MICROPHONE;
+    case MTP_CODE_BLUETOOTH:  return MTP_KEY_BLUETOOTH;
+    default:                  return MTP_KEY_NONE;
+    }
+}
+
+/* Whether a key is enabled in the configuration. */
+static inline bool mtp_key_enabled(MTPKey k, const MTPConfig *cfg) {
+    switch (k) {
+    case MTP_KEY_MICROPHONE: return cfg->keyMicrophone;
+    case MTP_KEY_BLUETOOTH:  return cfg->keyBluetooth;
+    case MTP_KEY_SCREENSHOT: return cfg->keyScreenshot;
+    default:                 return false;
+    }
+}
+
+static inline bool mtp_any_key_enabled(const MTPConfig *cfg) {
+    return cfg->keyMicrophone || cfg->keyBluetooth || cfg->keyScreenshot;
 }
 
 /* ── HID reports ─────────────────────────────────────────────────────────── */

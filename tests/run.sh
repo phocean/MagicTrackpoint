@@ -59,7 +59,8 @@ if clang -O2 -fobjc-arc -mmacosx-version-min=12.0 -arch arm64 -arch x86_64 \
         -Wall -Wextra -Werror -DMTP_VERSION="\"$VERSION_FILE\"" \
         -sectcreate __TEXT __info_plist src/Info.plist \
         -o "$D" src/magictrackpointd.m \
-        -framework Foundation -framework IOKit -framework ApplicationServices; then
+        -framework Foundation -framework IOKit -framework ApplicationServices \
+        -framework CoreAudio -framework CoreServices -framework AudioToolbox; then
     ok "daemon builds (universal, -Werror)"
 else
     fail "daemon builds (universal, -Werror)"

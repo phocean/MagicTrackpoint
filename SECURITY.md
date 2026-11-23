@@ -58,6 +58,10 @@ These are the security properties a report can show to be broken:
 - **Keystrokes are never recorded**: keyboard reports are discarded on their
   first byte, never copied, stored or logged. With scrolling disabled, the
   helper does not receive them at all.
+- **The three special keys** (F4, F10, Print Screen) reach the helper on
+  their own, never with typing. F10 never uses Control Center's Bluetooth
+  switch (it only opens or closes the device list); F4 reads no audio, it only
+  changes the microphone's mute setting. No program is ever started.
 - **Only the middle button and the wheel are filtered**, and only during a
   TrackPoint gesture (plus at most 250 ms after it). Trackpad scrolling is
   never touched.

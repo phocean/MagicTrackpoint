@@ -78,3 +78,14 @@ puis `gesture end: travel=… scrolled=… click=… pointer-motion-reports=…`
 | Fuites après reconnexions | RSS avant et après 10 déconnexions/reconnexions | |
 | Latence | Impression subjective du clic et du défilement par rapport au daemon d'origine | |
 | Comparaison | Mêmes mesures avec TrackPointD d'origine, si réinstallé temporairement | |
+
+## Touches spéciales (1.1.0)
+
+| Test | Manipulation | Attendu | Résultat |
+|---|---|---|---|
+| Micro | F4, parler en regardant *Réglages → Son → Entrée*, F4 | Son *Pop*, jauge à plat ; son *Tink*, jauge active ; `microphone=` suit | OK 2026-11-23 |
+| Bluetooth | F10, puis F10 | Centre de contrôle sur la liste Bluetooth, puis entièrement fermé ; le Bluetooth reste actif | OK 2026-11-23 (fermeture complète après correction) |
+| Capture | Impr. écran | Fenêtre de capture (⇧⌘5, CleanShot) | OK 2026-11-23 |
+| Rechargement juste après démarrage | `restart` puis `reload` aussitôt | Le daemon reste actif (`runs = 1`) | OK 2026-11-23 |
+| Touches désactivées | `keys.*` à faux, `reload` | Aucune action | |
+| Récepteur USB | Mêmes touches en USB | Mêmes actions | |

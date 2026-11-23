@@ -206,7 +206,7 @@ check "ctl status shows the status file" contains "$OUT" "  state=connected"
 check "ctl status runs the config check on MTP_HOME" contains "$OUT" "dummy check-config $CONFIG"
 check "ctl check PATH" run_ctl check /some/path.plist
 check "ctl check passes PATH through" contains "$OUT" "dummy check-config /some/path.plist"
-check "ctl reload" run_ctl reload
+check "ctl reload" env MTP_RELOAD_WAIT=0 bash "$ROOT/tools/magictrackpointctl" reload
 check "ctl reload sends SIGHUP" contains "$STUB_LOG" "kill SIGHUP gui/$UID_NUM/$LABEL"
 
 PANE="x-apple.systempreferences:com.apple.preference.security?Privacy_"

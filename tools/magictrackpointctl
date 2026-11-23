@@ -91,6 +91,10 @@ cmd_stop() {
 
 cmd_reload() {
     is_loaded || die "$LABEL is not loaded (run: magictrackpointctl start)"
+    # A daemon that has just started writes its status file once it handles
+    # signals; a SIGHUP sent earlier (right after "start") would end it.
+    local n=0 wait=${MTP_RELOAD_WAIT:-50}
+    while [ ! -s "$STATUS_FILE" ] && [ "$n" -lt "$wait" ]; do n=$((n + 1)); sleep 0.1; done
     "$LAUNCHCTL" kill SIGHUP "$SERVICE" || die "launchctl kill SIGHUP $SERVICE failed (is it running?)"
     echo "Sent SIGHUP to $LABEL: configuration reloaded."
 }

@@ -1,13 +1,15 @@
 # MagicTrackpoint
 
 Petit daemon macOS, sans interface, pour le clavier **Lenovo ThinkPad TrackPoint
-Keyboard II**. Il fait trois choses :
+Keyboard II**. Il :
 
 - règle la **sensibilité matérielle** du TrackPoint (1 à 9) et la réapplique
   après reconnexion et sortie de veille ;
 - transforme **bouton central tenu + TrackPoint** en défilement vertical et
   horizontal, avec vitesse et seuil réglables ;
-- émet un **clic central** seulement quand le bouton a été relâché sans défiler.
+- émet un **clic central** seulement quand le bouton a été relâché sans défiler ;
+- donne une action aux touches **F4** (couper le micro), **F10** (Bluetooth du
+  Centre de contrôle) et **Impr. écran** (⇧⌘5).
 
 Un seul processus (`magictrackpointd`), lancé par un LaunchAgent utilisateur, sans
 root, sans réseau, sans dépendance hors macOS. Logiciel libre sous licence
@@ -112,6 +114,9 @@ facultatives.
 | `scroll.horizontal` | booléen | vrai | défilement horizontal |
 | `scroll.threshold` | entier 0–50 | 3 | seuil clic/défilement, en unités de défilement du clavier |
 | `middle_button.click_if_no_scroll` | booléen | vrai | clic central si aucun défilement |
+| `keys.microphone` | booléen | vrai | F4 coupe ou rétablit le micro par défaut (son *Pop* = coupé, *Tink* = rétabli) |
+| `keys.bluetooth` | booléen | vrai | F10 ouvre le Centre de contrôle sur le Bluetooth ; une seconde pression le ferme |
+| `keys.screenshot` | booléen | vrai | Impr. écran envoie ⇧⌘5 (capture macOS, CleanShot…) |
 | `logging.level` | `error`, `info`, `debug` | `error` | verbosité du journal |
 
 Modifier puis appliquer :
@@ -230,6 +235,10 @@ Tests manuels avec le clavier : [docs/tests-manuels.md](tests-manuels.md).
 - Les rapports clavier partagent le périphérique Bluetooth et passent donc par le
   daemon : ils sont écartés à la première comparaison, jamais copiés, stockés ni
   journalisés.
+- Les trois touches spéciales (F4, F10, Impr. écran) parviennent au daemon
+  seules, sans la frappe. F10 n'utilise jamais l'interrupteur Bluetooth (qui
+  déconnecterait le clavier) ; F4 ne lit aucun son, il ne change que le
+  réglage « muet » du micro.
 - Seuls le bouton central et la molette sont filtrés, et seulement pendant un
   geste TrackPoint (plus 250 ms au plus après) ; le trackpad (défilement
   continu) n'est jamais touché.

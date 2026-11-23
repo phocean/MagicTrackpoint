@@ -15,7 +15,8 @@ SIGN_IDENTITY ?= -
 
 CC         := clang
 CFLAGS     := -O2 -fobjc-arc -mmacosx-version-min=12.0 -arch arm64 -arch x86_64 -Wall -Wextra
-FRAMEWORKS := -framework Foundation -framework IOKit -framework ApplicationServices
+FRAMEWORKS := -framework Foundation -framework IOKit -framework ApplicationServices \
+              -framework CoreAudio -framework CoreServices -framework AudioToolbox
 
 SRC   := src/magictrackpointd.m
 HDRS  := src/mtp_core.h

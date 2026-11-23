@@ -373,3 +373,64 @@ numéros de rapports, commandes de configuration, que le droit d'auteur ne
 protège pas. Une comparaison ligne à ligne avec le code d'origine ne trouve
 plus que des signatures de fonctions imposées par les API d'Apple. Le test
 exhaustif des 256 valeurs d'octet confirme que le comportement est inchangé.
+
+## 14. Touches spéciales (1.1.0)
+
+Mesuré sur le clavier Bluetooth le 2026-11-23 : plusieurs touches de la rangée
+du haut envoient le rapport vendeur `0x05` au lieu d'une touche standard, que
+macOS ignore (aucun raccourci système ni Karabiner ne peut les voir).
+
+| Touche | Code (13 bits) | Action |
+|---|---|---|
+| F4 | `0x0BB` | coupe / rétablit le micro par défaut |
+| F10 | `0x0B6` | Centre de contrôle, module Bluetooth ; seconde pression : fermeture |
+| F8, F9, F11, F12 | `0x0C1`, `0x0BC`, `0x1B7`, `0x0B8` | aucune (relâché : `0`) |
+| Impr. écran | touche standard (page 7, usage `0x46`, F13 pour macOS) | envoie ⇧⌘5 |
+
+**Lecture sans la frappe.** Le descripteur déclare le code comme 13 éléments
+d'un bit (page `0xFF00`, usages `0xF1`–`0xFD`) : IOKit le livre bit par bit.
+Le daemon ne s'abonne qu'à cette page et à l'usage Impr. écran, par le rappel
+de **valeurs** filtré par correspondance ; il reconstruit le code une fois tous
+les bits d'un rapport reçus (`mtp_key_bit`, `mtp_key_settle`, testés avec les
+séquences mesurées). Ce rappel ne voit jamais les touches de frappe, même
+défilement désactivé ; les rapports complets restent réservés au défilement.
+
+**Micro (F4).** Propriété *mute* du périphérique d'entrée par défaut, via Core
+Audio : aucun processus lancé, aucun son lu. macOS n'affiche rien : un son
+système (*Pop* coupé, *Tink* rétabli) et la ligne `microphone=` du statut
+donnent l'état.
+
+**Bluetooth (F10).** Aucune API publique n'ouvre le Centre de contrôle. L'API
+d'accessibilité (déjà accordée) le permet : appui sur l'élément de la barre
+des menus `com.apple.menuextra.controlcenter` (porté par `MenuBarAgent` sous
+macOS 27), puis action « afficher les détails » du module
+`controlcenter-bluetooth`. Recherche par identifiants stables, jamais par
+libellés localisés ; aucun contenu n'est lu ni journalisé ; délai de 0,25 s par
+appel. L'action *AXPress* du module **basculerait le Bluetooth** et
+déconnecterait le clavier : elle n'est jamais utilisée. Tout échec retombe sur
+*Réglages Système → Bluetooth* (URL `x-apple.systempreferences:`).
+
+Seconde pression : fermeture complète. Mesuré sous macOS 27 : appuyer sur
+l'élément de la barre des menus pendant que la liste Bluetooth est affichée ne
+ramène qu'au panneau principal, après une animation d'environ 300 ms pendant
+laquelle aucun élément n'est visible ; un second appui ferme tout. Le daemon
+observe donc toutes les 100 ms, n'appuie de nouveau qu'une fois le panneau
+principal réellement affiché, et s'arrête dès qu'il ne reste aucune fenêtre du
+Centre de contrôle. Il n'appuie jamais panneau fermé (il ne peut donc pas le
+rouvrir) ; borné à 3 appuis et 2 s. Une première version, qui vérifiait au
+bout de 200 ms, concluait à tort à la fermeture en pleine animation.
+
+**Capture (Impr. écran).** Événement clavier synthétique ⇧⌘5 (code de touche
+`0x17`, indépendant de la disposition), injecté au niveau HID pour que les
+raccourcis globaux (CleanShot) le reçoivent ; marqué comme les autres
+événements du daemon.
+
+**Permissions.** Surveillance de l'entrée pour les trois touches ;
+Accessibilité aussi pour F10 et Impr. écran : elle est donc demandée dès que
+l'une de ces touches est active, même défilement désactivé.
+
+**Course au démarrage corrigée.** `magictrackpointctl reload` envoyé juste
+après un démarrage arrivait avant que le processus ne gère `SIGHUP`, pendant
+son chargement : launchd l'arrêtait (« last terminating signal = Hangup »).
+La commande attend désormais le fichier d'état (5 s au plus) ; le daemon
+ignore aussi `SIGHUP` dès l'entrée de `main`.

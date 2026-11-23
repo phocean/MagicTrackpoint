@@ -22,11 +22,15 @@
  */
 #import "mtp_core.h"
 #import <ApplicationServices/ApplicationServices.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <CoreAudio/CoreAudio.h>
+#import <CoreServices/CoreServices.h>
 #import <IOKit/IOMessage.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <os/log.h>
+#include <libproc.h>
 #include <signal.h>
 #include <sys/stat.h>
 
@@ -51,6 +55,8 @@ typedef struct {
     MTPWrite sensitivity, scroll;
     int retries;
     bool retryQueued;            /* one report-triggered retry at a time */
+    MTPKeyState keys;            /* Lenovo top-row key code being rebuilt */
+    bool keySettleQueued;
 } MTPDevice;
 
 static MTPConfig g_cfg;
@@ -115,13 +121,77 @@ static bool trackpoint_held(void) {
             return true;
     return false;
 }
-static bool needs_accessibility(void) { return g_cfg.scrollEnabled; }
+/* Event taps serve scrolling only. Accessibility serves scrolling, and the
+ * Bluetooth and screenshot keys (they drive the user interface). */
+static bool needs_taps(void) { return g_cfg.scrollEnabled; }
+static bool needs_accessibility(void) {
+    return g_cfg.scrollEnabled || g_cfg.keyBluetooth || g_cfg.keyScreenshot;
+}
 static bool taps_ready(void) { return g_buttonTap && g_scrollTap; }
 /* Scrolling is only switched on in the firmware when we can also neutralise
  * its native side effects; otherwise the keyboard stays in its native mode. */
 static bool scroll_active(void) { return g_cfg.scrollEnabled && taps_ready(); }
 static bool fully_running(void) {
-    return g_listenGranted && g_hid && (!needs_accessibility() || (g_axGranted && taps_ready()));
+    return g_listenGranted && g_hid && (!needs_accessibility() || g_axGranted) &&
+           (!needs_taps() || taps_ready());
+}
+
+/* ── Microphone (F4) ─────────────────────────────────────────────────────── */
+/* Mute property of the default input device, through Core Audio: no process
+ * is started, no audio is read (only the mute control is changed). */
+static bool default_input(AudioDeviceID *dev, AudioObjectPropertyAddress *mute) {
+    AudioObjectPropertyAddress def = { kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = sizeof *dev;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &def, 0, NULL, &size, dev) ||
+        *dev == kAudioObjectUnknown) return false;
+    *mute = (AudioObjectPropertyAddress){ kAudioDevicePropertyMute,
+        kAudioDevicePropertyScopeInput, kAudioObjectPropertyElementMain };
+    return AudioObjectHasProperty(*dev, mute);
+}
+
+static const char *microphone_state(void) {
+    AudioDeviceID dev;
+    AudioObjectPropertyAddress mute;
+    if (!default_input(&dev, &mute)) return "no-mute-control";
+    UInt32 muted = 0, size = sizeof muted;
+    if (AudioObjectGetPropertyData(dev, &mute, 0, NULL, &size, &muted)) return "unknown";
+    return muted ? "muted" : "on";
+}
+
+/* Audible feedback, since macOS shows nothing when the input is muted: two
+ * distinct system sounds, loaded once. */
+static void microphone_sound(bool muted) {
+    static SystemSoundID sounds[2];
+    const char *files[2] = { "/System/Library/Sounds/Tink.aiff", "/System/Library/Sounds/Pop.aiff" };
+    int i = muted ? 1 : 0;
+    if (!sounds[i]) {
+        CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)files[i],
+                                                               (CFIndex)strlen(files[i]), false);
+        if (!url) return;
+        if (AudioServicesCreateSystemSoundID(url, &sounds[i])) sounds[i] = 0;
+        CFRelease(url);
+    }
+    if (sounds[i]) AudioServicesPlaySystemSound(sounds[i]);
+}
+
+static void toggle_microphone(void) {
+    AudioDeviceID dev;
+    AudioObjectPropertyAddress mute;
+    Boolean settable = false;
+    UInt32 muted = 0, size = sizeof muted;
+    if (!default_input(&dev, &mute) || AudioObjectIsPropertySettable(dev, &mute, &settable) ||
+        !settable || AudioObjectGetPropertyData(dev, &mute, 0, NULL, &size, &muted)) {
+        LOG_ERROR("microphone key: the default input device has no mute control");
+        return;
+    }
+    muted = !muted;
+    if (AudioObjectSetPropertyData(dev, &mute, 0, NULL, sizeof muted, &muted)) {
+        LOG_ERROR("microphone key: could not change the mute state");
+        return;
+    }
+    LOG_INFO("microphone %{public}s", muted ? "muted" : "unmuted");
+    microphone_sound(muted);
 }
 
 /* ── Status file (state only — never input data) ─────────────────────────── */
@@ -135,7 +205,7 @@ static void write_status(void) {
             g_axGranted ? "granted" : needs_accessibility() ? "MISSING" : "not-needed"];
         [s appendFormat:@"hid=%s\nevent_taps=%s\n",
             g_hid ? "open" : "MISSING",
-            taps_ready() ? "ready" : needs_accessibility() ? "MISSING" : "not-needed"];
+            taps_ready() ? "ready" : needs_taps() ? "MISSING" : "not-needed"];
         [s appendFormat:@"config=%@ (%s, %lu error(s))\n", config_path(),
             g_cfgExists ? "loaded" : "absent, defaults", (unsigned long)g_cfgErrors.count];
         [s appendFormat:@"sensitivity=%d\nscroll=%s speed=%g acceleration=%g threshold=%d "
@@ -143,6 +213,9 @@ static void write_status(void) {
             scroll_active() ? "on" : g_cfg.scrollEnabled ? "configured, inactive" : "off",
             g_cfg.speed, g_cfg.acceleration, g_cfg.threshold, g_cfg.horizontal ? "on" : "off",
             g_cfg.clickIfNoScroll ? "on" : "off"];
+        [s appendFormat:@"keys=microphone:%s bluetooth:%s screenshot:%s\nmicrophone=%s\n",
+            g_cfg.keyMicrophone ? "on" : "off", g_cfg.keyBluetooth ? "on" : "off",
+            g_cfg.keyScreenshot ? "on" : "off", microphone_state()];
         [s appendFormat:@"devices=%d\n", device_count()];
         for (int i = 0; i < MTP_MAX_DEVICES; i++) {
             MTPDevice *d = &g_dev[i];
@@ -451,6 +524,265 @@ static void wheel_report(MTPDevice *d, uint8_t h, uint8_t v) {
         post(CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, py, px));
 }
 
+/* ── Bluetooth key (F10): Control Center, Bluetooth module ───────────────── */
+/* No public API opens Control Center. The Accessibility API (already granted
+ * for scrolling) can: press the Control Center menu bar item, then use the
+ * Bluetooth module's "show details" action. Elements are found by their
+ * stable identifiers, never by localized names; nothing they contain is read
+ * or logged. The module's own press action toggles Bluetooth (and would
+ * disconnect this keyboard): it is never used. Any failure falls back to the
+ * Bluetooth pane of System Settings. Each Accessibility call is bounded by a
+ * short timeout, so a busy system cannot block the daemon. */
+#define MTP_AX_TIMEOUT 0.25f
+#define MTP_CC_ITEM    "com.apple.menuextra.controlcenter"
+#define MTP_CC_BT      "controlcenter-bluetooth"   /* module, main view    */
+#define MTP_CC_BT_LIST "bluetooth-header"          /* its details view     */
+
+static void open_bluetooth_settings(void) {
+    CFURLRef url = CFURLCreateWithString(NULL,
+        CFSTR("x-apple.systempreferences:com.apple.BluetoothSettings"), NULL);
+    if (!url) return;
+    OSStatus err = LSOpenCFURLRef(url, NULL);
+    CFRelease(url);
+    if (err) LOG_ERROR("Bluetooth key: cannot open System Settings (%d)", (int)err);
+}
+
+/* pid of this user's process named `name`, or 0. */
+static pid_t user_process(const char *name) {
+    int count = proc_listallpids(NULL, 0);
+    if (count <= 0) return 0;
+    pid_t *pids = calloc((size_t)count + 16, sizeof *pids);
+    if (!pids) return 0;
+    count = proc_listallpids(pids, (int)((size_t)(count + 16) * sizeof *pids));
+    pid_t found = 0;
+    for (int i = 0; i < count && !found; i++) {
+        char comm[2 * MAXCOMLEN + 1] = {0};
+        struct proc_bsdshortinfo info;
+        if (proc_name(pids[i], comm, sizeof comm) <= 0 || strcmp(comm, name)) continue;
+        if (proc_pidinfo(pids[i], PROC_PIDT_SHORTBSDINFO, 0, &info, sizeof info) == sizeof info &&
+            info.pbsi_uid == getuid()) found = pids[i];
+    }
+    free(pids);
+    return found;
+}
+
+static bool ax_identifier_is(AXUIElementRef e, const char *ident) {
+    CFTypeRef v = NULL;
+    if (AXUIElementCopyAttributeValue(e, kAXIdentifierAttribute, &v) != kAXErrorSuccess || !v)
+        return false;
+    char buf[128] = {0};
+    bool same = CFGetTypeID(v) == CFStringGetTypeID() &&
+        CFStringGetCString(v, buf, sizeof buf, kCFStringEncodingUTF8) && !strcmp(buf, ident);
+    CFRelease(v);
+    return same;
+}
+
+/* Depth-first search of `root`'s attribute `attr` (children, windows…) for an
+ * element with identifier `ident`. Retained result, or NULL. */
+static AXUIElementRef ax_find(AXUIElementRef root, CFStringRef attr, const char *ident, int depth) {
+    if (depth > 7) return NULL;
+    CFTypeRef kids = NULL;
+    if (AXUIElementCopyAttributeValue(root, attr, &kids) != kAXErrorSuccess || !kids) return NULL;
+    AXUIElementRef hit = NULL;
+    if (CFGetTypeID(kids) == CFArrayGetTypeID()) {
+        for (CFIndex i = 0, n = CFArrayGetCount(kids); i < n && !hit; i++) {
+            AXUIElementRef e = (AXUIElementRef)CFArrayGetValueAtIndex(kids, i);
+            if (ax_identifier_is(e, ident)) hit = (AXUIElementRef)CFRetain(e);
+            else hit = ax_find(e, kAXChildrenAttribute, ident, depth + 1);
+        }
+    } else if (CFGetTypeID(kids) == AXUIElementGetTypeID()) {   /* single element */
+        AXUIElementRef e = (AXUIElementRef)kids;
+        hit = ax_identifier_is(e, ident) ? (AXUIElementRef)CFRetain(e)
+                                         : ax_find(e, kAXChildrenAttribute, ident, depth + 1);
+    }
+    CFRelease(kids);
+    return hit;
+}
+
+/* The Control Center menu bar item: owned by MenuBarAgent (macOS 27) or by
+ * ControlCenter itself (earlier versions). */
+static AXUIElementRef control_center_item(void) {
+    const char *owners[] = { "MenuBarAgent", "ControlCenter" };
+    for (int i = 0; i < 2; i++) {
+        pid_t pid = user_process(owners[i]);
+        if (!pid) continue;
+        AXUIElementRef app = AXUIElementCreateApplication(pid);
+        AXUIElementSetMessagingTimeout(app, MTP_AX_TIMEOUT);
+        AXUIElementRef item = ax_find(app, kAXWindowsAttribute, MTP_CC_ITEM, 0);
+        if (!item) item = ax_find(app, CFSTR("AXExtrasMenuBar"), MTP_CC_ITEM, 0);
+        CFRelease(app);
+        if (item) return item;
+    }
+    return NULL;
+}
+
+/* The Bluetooth module's "show details" action: the one custom action (not
+ * AXPress) of the element. Retained, or NULL. */
+static CFStringRef details_action(AXUIElementRef module) {
+    CFArrayRef actions = NULL;
+    if (AXUIElementCopyActionNames(module, &actions) != kAXErrorSuccess || !actions) return NULL;
+    CFStringRef found = NULL;
+    for (CFIndex i = 0, n = CFArrayGetCount(actions); i < n && !found; i++) {
+        CFStringRef a = CFArrayGetValueAtIndex(actions, i);
+        if (CFStringHasPrefix(a, CFSTR("Name:"))) found = CFRetain(a);
+    }
+    CFRelease(actions);
+    return found;
+}
+
+/* An element of an open Control Center panel. Retained, or NULL. */
+static AXUIElementRef control_center_element(const char *ident) {
+    pid_t pid = user_process("ControlCenter");
+    if (!pid) return NULL;
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, MTP_AX_TIMEOUT);
+    AXUIElementRef found = ax_find(app, kAXWindowsAttribute, ident, 0);
+    CFRelease(app);
+    return found;
+}
+static AXUIElementRef bluetooth_module(void) { return control_center_element(MTP_CC_BT); }
+
+/* Number of Control Center windows: 0 once its panel is closed. */
+static long control_center_windows(void) {
+    pid_t pid = user_process("ControlCenter");
+    if (!pid) return 0;
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, MTP_AX_TIMEOUT);
+    CFTypeRef wins = NULL;
+    long n = 0;
+    if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, &wins) == kAXErrorSuccess && wins) {
+        if (CFGetTypeID(wins) == CFArrayGetTypeID()) n = CFArrayGetCount(wins);
+        CFRelease(wins);
+    }
+    CFRelease(app);
+    return n;
+}
+
+static void press_control_center_item(void) {
+    AXUIElementRef item = control_center_item();
+    if (!item) return;
+    AXUIElementPerformAction(item, kAXPressAction);
+    CFRelease(item);
+}
+
+/* Closes Control Center entirely. Measured on macOS 27: pressing its menu bar
+ * item while the Bluetooth list is shown only goes back to the main panel
+ * (a ~300 ms animation during which no element is visible); a second press
+ * closes it. So: watch every 100 ms; press again only once the main panel is
+ * actually displayed; stop as soon as no Control Center window is left. The
+ * item is never pressed while the panel is closed, so it is never reopened.
+ * Bounded: 3 presses, 2 seconds. */
+static void close_control_center_step(int presses, int polls) {
+    if (!control_center_windows()) {
+        LOG_INFO("Bluetooth key: Control Center closed");
+        return;
+    }
+    AXUIElementRef main = bluetooth_module();
+    if (main) {
+        CFRelease(main);
+        if (presses >= 3) { LOG_ERROR("Bluetooth key: Control Center did not close"); return; }
+        press_control_center_item();
+        presses++;
+    }
+    if (polls >= 20) { LOG_ERROR("Bluetooth key: Control Center did not close"); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{ close_control_center_step(presses, polls + 1); });
+}
+
+static void close_control_center(void) {
+    if (!control_center_windows()) return;
+    AXUIElementRef list = control_center_element(MTP_CC_BT_LIST);
+    if (list) { CFRelease(list); press_control_center_item(); close_control_center_step(1, 0); }
+    else close_control_center_step(0, 0);
+}
+
+/* Control Center draws its panel asynchronously: the module is looked for a
+ * few times, 100 ms apart, then the attempt gives up (closing the panel).
+ * `item` (retained) is NULL when the panel was already open. */
+static void show_bluetooth_details(AXUIElementRef item, int attempt) {
+    AXUIElementRef module = bluetooth_module();
+    CFStringRef action = module ? details_action(module) : NULL;
+    if (action) {
+        AXError err = AXUIElementPerformAction(module, action);
+        if (err == kAXErrorSuccess) LOG_INFO("Bluetooth key: Control Center, Bluetooth module");
+        else { LOG_ERROR("Bluetooth key: details action failed (%d)", (int)err); open_bluetooth_settings(); }
+    } else if (attempt < 10) {
+        if (module) CFRelease(module);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{ show_bluetooth_details(item, attempt + 1); });
+        return;                                   /* item is released by the last attempt */
+    } else {
+        LOG_ERROR("Bluetooth key: no Bluetooth module in Control Center, opening System Settings");
+        close_control_center();
+        open_bluetooth_settings();
+    }
+    if (action) CFRelease(action);
+    if (module) CFRelease(module);
+    if (item) CFRelease(item);
+}
+
+/* F10 toggles: a second press, while the Bluetooth list is shown, closes
+ * Control Center entirely. */
+static void bluetooth_key(void) {
+    if (!AXIsProcessTrusted()) { open_bluetooth_settings(); return; }
+    AXUIElementRef list = control_center_element(MTP_CC_BT_LIST);
+    if (list) { CFRelease(list); close_control_center(); return; }
+    AXUIElementRef open = bluetooth_module();     /* panel already open */
+    if (open) { CFRelease(open); show_bluetooth_details(NULL, 0); return; }
+    AXUIElementRef item = control_center_item();
+    if (!item || AXUIElementPerformAction(item, kAXPressAction) != kAXErrorSuccess) {
+        LOG_ERROR("Bluetooth key: Control Center item not found, opening System Settings");
+        if (item) CFRelease(item);
+        open_bluetooth_settings();
+        return;
+    }
+    show_bluetooth_details(item, 0);
+}
+
+/* ── Screenshot key (Print Screen): ⇧⌘5 ──────────────────────────────────── */
+/* The standard macOS screenshot shortcut, also used by tools such as CleanShot.
+ * Key code 0x17 is the "5" key position (kVK_ANSI_5), independent of the
+ * keyboard layout, as macOS shortcuts are. */
+static void screenshot_key(void) {
+    if (!AXIsProcessTrusted()) {
+        LOG_ERROR("screenshot key: Accessibility not granted");
+        return;
+    }
+    for (int down = 1; down >= 0; down--) {
+        CGEventRef e = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)0x17, down);
+        if (!e) continue;
+        CGEventSetFlags(e, kCGEventFlagMaskShift | kCGEventFlagMaskCommand);
+        CGEventSetIntegerValueField(e, kCGEventSourceUserData, MTP_EVENT_MAGIC);
+        CGEventPost(kCGHIDEventTap, e);
+        CFRelease(e);
+    }
+    LOG_INFO("screenshot key: sent shift-command-5");
+}
+
+static void run_key(MTPKey key) {
+    if (!mtp_key_enabled(key, &g_cfg)) return;
+    switch (key) {
+    case MTP_KEY_MICROPHONE: toggle_microphone(); write_status(); break;
+    case MTP_KEY_BLUETOOTH:  bluetooth_key(); break;
+    case MTP_KEY_SCREENSHOT: screenshot_key(); break;
+    default: break;
+    }
+}
+
+/* All bit elements of one report are delivered in one go; the code is
+ * evaluated once they are, right after the callback. */
+static void settle_keys(MTPDevice *d) {
+    if (d->keySettleQueued) return;
+    d->keySettleQueued = true;
+    IOHIDDeviceRef device = d->device;    /* compared, never dereferenced, later */
+    dispatch_async(dispatch_get_main_queue(), ^{ @autoreleasepool {
+        MTPDevice *x = device_for(device);
+        if (!x) return;
+        x->keySettleQueued = false;
+        run_key(mtp_key_settle(&x->keys));
+    }});
+}
+
 /* ── HID callbacks ───────────────────────────────────────────────────────── */
 /* Registered only while scrolling is active. Receives every input report of
  * the matched keyboard, keyboard keys included (they share the Bluetooth
@@ -494,16 +826,26 @@ static void report_callback(void *context, IOReturn result, void *sender,
     }
 }
 
-/* Value callbacks are restricted by matching to the two middle-button usages. */
+/* Value callbacks are restricted by matching to the two middle-button usages,
+ * the Lenovo key page and the Print Screen key: never to the typing keys. */
 static void value_callback(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
     (void)context; (void)sender;
-    if (result != kIOReturnSuccess || !scroll_active()) return;
+    if (result != kIOReturnSuccess) return;
     IOHIDElementRef element = IOHIDValueGetElement(value);
     /* Resolve through the element: older IOKit passes its queue as sender. */
     MTPDevice *d = device_for(IOHIDElementGetDevice(element));
     if (!d) return;
     uint32_t page = IOHIDElementGetUsagePage(element), usage = IOHIDElementGetUsage(element);
     bool down = IOHIDValueGetIntegerValue(value) != 0;
+    if (mtp_key_bit(&d->keys, IOHIDElementGetReportID(element), page, usage, down)) {
+        settle_keys(d);
+        return;
+    }
+    if (page == MTP_PRINT_SCREEN_PAGE && usage == MTP_PRINT_SCREEN_USAGE) {
+        if (down) run_key(MTP_KEY_SCREENSHOT);
+        return;
+    }
+    if (!scroll_active()) return;
     if (page == kHIDPage_Button && usage == 3) {
         if (d->productID == MTP_BLE_PID) {
             middle_changed(d, MTP_SRC_STANDARD, down);
@@ -561,13 +903,15 @@ static void device_removed(void *context, IOReturn result, void *sender, IOHIDDe
     }
 }
 
-/* Input is only needed for scrolling; while it is inactive, no report (and so
- * no keystroke) ever reaches this process: only configuration is written. */
+/* Whole input reports (typing included, discarded on the first comparison)
+ * reach this process only while scrolling is active. The value callback only
+ * ever sees the matched elements (middle button, Lenovo keys, Print Screen). */
 static void set_input_callbacks(void) {
     if (!g_hid) return;
-    bool on = scroll_active();
-    IOHIDManagerRegisterInputReportCallback(g_hid, on ? report_callback : NULL, NULL);
-    IOHIDManagerRegisterInputValueCallback(g_hid, on ? value_callback : NULL, NULL);
+    bool reports = scroll_active();
+    bool values = reports || mtp_any_key_enabled(&g_cfg);
+    IOHIDManagerRegisterInputReportCallback(g_hid, reports ? report_callback : NULL, NULL);
+    IOHIDManagerRegisterInputValueCallback(g_hid, values ? value_callback : NULL, NULL);
 }
 
 static void start_hid(void) {
@@ -581,6 +925,9 @@ static void start_hid(void) {
     IOHIDManagerSetInputValueMatchingMultiple(g_hid, (__bridge CFArrayRef)@[
         @{@kIOHIDElementUsagePageKey: @(kHIDPage_Button), @kIOHIDElementUsageKey: @3},
         @{@kIOHIDElementUsagePageKey: @0xFFA0, @kIOHIDElementUsageKey: @0xFB},
+        @{@kIOHIDElementUsagePageKey: @(MTP_KEYS_PAGE)},
+        @{@kIOHIDElementUsagePageKey: @(MTP_PRINT_SCREEN_PAGE),
+          @kIOHIDElementUsageKey: @(MTP_PRINT_SCREEN_USAGE)},
     ]);
     /* Callbacks are registered before scheduling and opening. */
     IOHIDManagerRegisterDeviceMatchingCallback(g_hid, device_added, NULL);
@@ -601,7 +948,7 @@ static void start_hid(void) {
 /* ── Permissions and start-up ────────────────────────────────────────────── */
 static void start_components(void) {
     if (g_listenGranted) start_hid();
-    if (g_axGranted && needs_accessibility() && !taps_ready()) {
+    if (g_axGranted && needs_taps() && !taps_ready()) {
         if (!g_buttonTap)
             g_buttonTap = create_tap(CGEventMaskBit(kCGEventOtherMouseDown) |
                 CGEventMaskBit(kCGEventOtherMouseUp) | CGEventMaskBit(kCGEventOtherMouseDragged));
@@ -626,7 +973,7 @@ static void check_permissions(bool prompt) {
         if (listen != g_listenGranted || ax != g_axGranted || prompt) {
             if (!listen) LOG_ERROR("Input Monitoring not granted: keyboard cannot be read");
             if (!ax && needs_accessibility())
-                LOG_ERROR("Accessibility not granted: scrolling and middle click unavailable");
+                LOG_ERROR("Accessibility not granted: scrolling, middle click and keys unavailable");
         }
         g_listenGranted = listen;
         g_axGranted = ax;
@@ -739,14 +1086,20 @@ static int check_config(const char *path) {
     printf("trackpoint.sensitivity = %d\nscroll.enabled = %s\nscroll.speed = %g\n"
            "scroll.acceleration = %g\n"
            "scroll.horizontal = %s\nscroll.threshold = %d\nmiddle_button.click_if_no_scroll = %s\n"
+           "keys.microphone = %s\nkeys.bluetooth = %s\nkeys.screenshot = %s\n"
            "logging.level = %s\n", c.sensitivity, c.scrollEnabled ? "true" : "false", c.speed,
            c.acceleration, c.horizontal ? "true" : "false", c.threshold, c.clickIfNoScroll ? "true" : "false",
+           c.keyMicrophone ? "true" : "false", c.keyBluetooth ? "true" : "false",
+           c.keyScreenshot ? "true" : "false",
            (const char *[]){"error", "info", "debug"}[c.logLevel]);
     for (NSString *e in errors) printf("error: %s (default kept)\n", e.UTF8String);
     return errors.count ? 1 : 0;
 }
 
 int main(int argc, const char *argv[]) {
+    /* A reload request (SIGHUP) arriving before its handler is installed
+     * would otherwise terminate the process; it is handled from below. */
+    signal(SIGHUP, SIG_IGN);
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--version")) { puts(MTP_VERSION); return 0; }
         if ((argc == 2 || argc == 3) && !strcmp(argv[1], "--check-config"))

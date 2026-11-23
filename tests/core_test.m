@@ -42,7 +42,9 @@ static bool cfg_equal(MTPConfig a, MTPConfig b) {
     return a.sensitivity == b.sensitivity && a.scrollEnabled == b.scrollEnabled &&
         a.speed == b.speed && a.acceleration == b.acceleration &&
         a.horizontal == b.horizontal && a.threshold == b.threshold &&
-        a.clickIfNoScroll == b.clickIfNoScroll && a.logLevel == b.logLevel;
+        a.clickIfNoScroll == b.clickIfNoScroll && a.keyMicrophone == b.keyMicrophone &&
+        a.keyBluetooth == b.keyBluetooth && a.keyScreenshot == b.keyScreenshot &&
+        a.logLevel == b.logLevel;
 }
 
 static bool errors_contain(NSArray<NSString *> *errors, NSString *needle) {
@@ -1441,6 +1443,79 @@ static void test_audit_fixes(void) {
     }
 }
 
+/* Top-row keys: bit sequences as measured on the Bluetooth keyboard
+ * (2026-11-23), highest usage first, as IOKit delivered them. */
+static MTPKey press_bits(MTPKeyState *s, const uint32_t *usages, int n) {
+    for (int i = 0; i < n; i++) mtp_key_bit(s, 0x05, 0xFF00, usages[i], true);
+    return mtp_key_settle(s);
+}
+static void release_bits(MTPKeyState *s, const uint32_t *usages, int n) {
+    for (int i = 0; i < n; i++) mtp_key_bit(s, 0x05, 0xFF00, usages[i], false);
+    mtp_key_settle(s);
+}
+
+static void test_keys(void) {
+    g_group = "keys.decode";
+    const uint32_t f4[] = {0xF8, 0xF6, 0xF5, 0xF4, 0xF2, 0xF1};          /* 0x0BB */
+    const uint32_t f10[] = {0xF8, 0xF6, 0xF5, 0xF3, 0xF2};               /* 0x0B6 */
+    const uint32_t f8[] = {0xF8, 0xF7, 0xF1};                            /* 0x0C1 */
+    const uint32_t f9[] = {0xF8, 0xF6, 0xF5, 0xF4, 0xF3};                /* 0x0BC */
+    const uint32_t f11[] = {0xF9, 0xF8, 0xF6, 0xF5, 0xF3, 0xF2, 0xF1};   /* 0x1B7 */
+    const uint32_t f12[] = {0xF8, 0xF6, 0xF5, 0xF4};                     /* 0x0B8 */
+    MTPKeyState s = {0};
+    CHECK(press_bits(&s, f4, 6) == MTP_KEY_MICROPHONE && s.bits == 0x0BB, "F4 bits=0x%03x", s.bits);
+    CHECK(mtp_key_settle(&s) == MTP_KEY_NONE, "F4 held: once per press");
+    release_bits(&s, f4, 6);
+    CHECK(s.bits == 0 && s.pressed == 0, "F4 released");
+    CHECK(press_bits(&s, f4, 6) == MTP_KEY_MICROPHONE, "F4 again after release");
+    release_bits(&s, f4, 6);
+    CHECK(press_bits(&s, f10, 5) == MTP_KEY_BLUETOOTH && s.bits == 0x0B6, "F10 bits=0x%03x", s.bits);
+    release_bits(&s, f10, 5);
+    struct { const uint32_t *u; int n; uint16_t code; const char *name; } other[] = {
+        {f8, 3, 0x0C1, "F8"}, {f9, 5, 0x0BC, "F9"}, {f11, 7, 0x1B7, "F11"}, {f12, 4, 0x0B8, "F12"},
+    };
+    for (int i = 0; i < 4; i++) {
+        CHECK(press_bits(&s, other[i].u, other[i].n) == MTP_KEY_NONE && s.bits == other[i].code,
+              "%s: code 0x%03x, no action (bits 0x%03x)", other[i].name, other[i].code, s.bits);
+        release_bits(&s, other[i].u, other[i].n);
+        CHECK(s.bits == 0 && s.pressed == 0, "%s released", other[i].name);
+    }
+    /* A code that changes while held (chord) never fires. */
+    press_bits(&s, f12, 4);
+    mtp_key_bit(&s, 0x05, 0xFF00, 0xF2, true); mtp_key_bit(&s, 0x05, 0xFF00, 0xF1, true);
+    CHECK(s.bits == 0x0BB && mtp_key_settle(&s) == MTP_KEY_NONE, "F12 then F4 bits: no action");
+    release_bits(&s, f4, 6);
+    /* Only report 0x05, page 0xFF00, usages 0xF1–0xFD. */
+    CHECK(!mtp_key_bit(&s, 0x15, 0xFF00, 0xF1, true), "other report");
+    CHECK(!mtp_key_bit(&s, 0x05, 0x0007, 0xF1, true), "other page");
+    CHECK(!mtp_key_bit(&s, 0x05, 0xFF00, 0xF0, true), "below range");
+    CHECK(!mtp_key_bit(&s, 0x05, 0xFF00, 0xFE, true), "above range");
+    CHECK(mtp_key_bit(&s, 0x05, 0xFF00, 0xFD, true) && s.bits == 0x1000, "13th bit");
+    mtp_key_bit(&s, 0x05, 0xFF00, 0xFD, false);
+    CHECK(s.bits == 0, "13th bit cleared");
+
+    g_group = "keys.config";
+    MTPConfig d = mtp_default_config();
+    CHECK(d.keyMicrophone && d.keyBluetooth && d.keyScreenshot, "keys on by default");
+    CHECK(mtp_any_key_enabled(&d), "any key enabled");
+    NSMutableArray *errors = [NSMutableArray array];
+    MTPConfig c = mtp_config_from_plist(@{@"keys": @{@"microphone": @NO, @"bluetooth": @NO,
+                                                    @"screenshot": @NO}}, errors);
+    CHECK(errors.count == 0 && !c.keyMicrophone && !c.keyBluetooth && !c.keyScreenshot,
+          "all keys off (%s)", joined(errors));
+    CHECK(!mtp_any_key_enabled(&c), "no key enabled");
+    CHECK(!mtp_key_enabled(MTP_KEY_MICROPHONE, &c) && mtp_key_enabled(MTP_KEY_MICROPHONE, &d),
+          "microphone follows the configuration");
+    CHECK(!mtp_key_enabled(MTP_KEY_NONE, &d), "no action for unknown keys");
+    for (NSString *key in @[@"microphone", @"bluetooth", @"screenshot"]) {
+        REJECT(@"keys", key, @1);
+        REJECT(@"keys", key, @"yes");
+    }
+    errors = [NSMutableArray array];
+    c = mtp_config_from_plist(@{@"keys": @{@"volume": @YES}}, errors);
+    CHECK(errors.count == 1 && errors_contain(errors, @"keys.volume"), "unknown key (%s)", joined(errors));
+}
+
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1459,6 +1534,7 @@ int main(void) {
         test_tap();
         test_tap_owed_wheel();
         test_audit_fixes();
+        test_keys();
 
         [NSFileManager.defaultManager removeItemAtPath:tmp_dir error:nil];
         if ([NSFileManager.defaultManager fileExistsAtPath:tmp_dir]) {

@@ -3,16 +3,20 @@
 **Make the Lenovo ThinkPad TrackPoint Keyboard II feel at home on a Mac.**
 
 MagicTrackpoint is a tiny background helper for macOS. It has no window and no
-menu-bar icon: you install it once, and from then on it does three things.
+menu-bar icon: you install it once, and from then on it does this.
 
 | | What you do | What happens |
 |---|---|---|
 | **Sensitivity** | nothing | The TrackPoint speed you chose (1–9) is set in the keyboard itself, and set again when the keyboard reconnects or the Mac wakes up. |
 | **Scrolling** | hold the middle button and push the TrackPoint | The page scrolls, up/down and left/right. Push harder to scroll faster. The cursor stays where it is. |
 | **Middle click** | press and release the middle button without pushing | A normal middle click (open a link in a new tab, close a tab, …). |
+| **Microphone key** (F4) | press it | Mutes or unmutes your microphone, with a short sound (*Pop* = muted, *Tink* = on). |
+| **Bluetooth key** (F10) | press it | Opens Control Center on the Bluetooth device list; press again to close it. |
+| **Print Screen** | press it | Sends ⇧⌘5, the screenshot shortcut (macOS or a tool such as CleanShot), like on the Mac's own keyboard. |
 
-That's the whole tool. No keyboard remapping, no accounts, no network, no
-telemetry, no automatic updates.
+That's the whole tool. No other keyboard remapping, no accounts, no network,
+no telemetry, no automatic updates. The other Lenovo keys (F8, F9, F11, F12)
+send codes macOS ignores; MagicTrackpoint leaves them alone.
 
 > Français : [docs/README.fr.md](docs/README.fr.md)
 
@@ -151,8 +155,8 @@ without your consent. MagicTrackpoint needs two permissions, both in
 
 | Permission | Why it is needed |
 |---|---|
-| **Input Monitoring** | to read the middle button and the scroll movements from the keyboard, and to send it the sensitivity |
-| **Accessibility** | to produce the scrolling and the middle click, and to hold back the keyboard's own middle click while you scroll |
+| **Input Monitoring** | to read the middle button, the scroll movements and the three special keys from the keyboard, and to send it the sensitivity |
+| **Accessibility** | to produce the scrolling and the middle click, to hold back the keyboard's own middle click while you scroll, and for the Bluetooth and Print Screen keys (they open Control Center and send ⇧⌘5) |
 
 Neither is optional: without the first, the keyboard cannot be read at all;
 without the second, nothing can be scrolled or clicked. (Reasoning and proof in
@@ -255,6 +259,9 @@ shows every key with its explanation.
 | `scroll.horizontal` | `true` / `false` | `true` | Allow left/right scrolling |
 | `scroll.threshold` | 0 to 50 | `3` | How much movement turns a middle press into a scroll (see below) |
 | `middle_button.click_if_no_scroll` | `true` / `false` | `true` | Send a middle click when you press without scrolling |
+| `keys.microphone` | `true` / `false` | `true` | F4 mutes or unmutes the default microphone |
+| `keys.bluetooth` | `true` / `false` | `true` | F10 opens Control Center on Bluetooth (falls back to *System Settings → Bluetooth*) |
+| `keys.screenshot` | `true` / `false` | `true` | Print Screen sends ⇧⌘5 |
 | `logging.level` | `error`, `info`, `debug` | `error` | How much the helper writes to the system log |
 
 ### Changing a setting
@@ -410,6 +417,12 @@ results are in [docs/architecture.md](docs/architecture.md) (in French).
   reports reach the helper because they share one connection with the
   TrackPoint; they are discarded on their first byte, never copied, stored or
   logged. When scrolling is disabled, the helper does not even receive them.
+  The three special keys are delivered to it on their own, by macOS, never
+  together with typing.
+- **Never turns Bluetooth off.** The Bluetooth key only ever opens or closes
+  the device list; it never uses the switch that would disconnect the
+  keyboard. It starts no program and the microphone key reads no sound: it
+  only changes the microphone's mute setting.
 - **Minimal logging**: errors only by default, kept on your Mac by the system
   log, never anything you type.
 - **Exactly two permissions**, both justified above.
@@ -441,6 +454,14 @@ verify a release.
   the next middle-button press and puts the keyboard back in its native mode.
 - If the helper crashes, macOS restarts it within 30 seconds; in between, a
   middle click may follow a scroll.
+- The Bluetooth key relies on how Control Center is built (checked on macOS
+  27). If a macOS update changes it, the key opens *System Settings →
+  Bluetooth* instead.
+- The microphone key needs a microphone with a mute control (the Mac's own
+  has one). macOS shows nothing on screen: the sound and
+  `magictrackpointctl status` (`microphone=muted`) tell you the state.
+- The special keys were measured on the Bluetooth keyboard; on the USB
+  receiver they are untested.
 
 ---
 
